@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL Database Service
+  db:
+    image: postgres:15-alpine
+    container_name: cyber-db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cyber_security
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d cyber_security" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # 2. Apache Kafka Service (KRaft Mode, single node)
+  kafka:
+    image: apache/kafka:latest
+    container_name: cyber-kafka
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR=1
+    restart: unless-stopped
+
+  # 3. Database Schema Initialization Service
+  db-init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyber-db-init
+    command: python db/db.py
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/cyber_security
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 4. Cyber Security Ingestion & Detection Backend (FastAPI API + Core consumer thread)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyber-backend
+    ports:
+      - "8001:8001"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/cyber_security
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    restart: on-failure
+
+  # 5. Behavioral Anomaly Detection Pipeline Consumer
+  anomaly-consumer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyber-anomaly-consumer
+    command: python consumers/anomaly/consumer.py
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/cyber_security
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    restart: on-failure
+
+  # 6. Volumetric DDoS Detection Pipeline Consumer
+  ddos-consumer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyber-ddos-consumer
+    command: python consumers/ddos/consumer.py
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/cyber_security
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    restart: on-failure
+
+  # 7. Checkout Fraud Detection Pipeline Consumer
+  fraud-consumer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyber-fraud-consumer
+    command: python consumers/fraud/consumer.py
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/cyber_security
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    restart: on-failure
+
+  # 8. Web React Dashboard Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cyber-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
